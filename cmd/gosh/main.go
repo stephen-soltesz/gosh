@@ -2,88 +2,114 @@ package main
 
 // Original copy from https://github.com/Scalingo/go-ssh-examples/blob/master/client.go
 import (
+	"flag"
 	"fmt"
+	"github.com/stephen-soltesz/gosh/flagext"
 	"log"
 	"os"
-	"io/ioutil"
 	// "net"
 	// "reflect"
 	// "crypto/x509"
 	// "encoding/pem"
 
-
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
+var (
+	fPrivateKey  flagext.FileBytes // private key used to authenticate with servers.
+	fHostKeyFile string            // list of allowed known host keys.
+	fPassword    string            // optional password if privateKey is empty.
+	fUser        string            // user
+	fHostname    string            // hostname
+)
+
 func init() {
-	log.SetFlags(log.LUTC|log.Lmicroseconds)
+	log.SetFlags(log.LUTC | log.Lmicroseconds)
+	flag.Var(&fPrivateKey, "private-key", "Filename of private RSA key")
+	flag.StringVar(&fHostKeyFile, "known-hosts", "", "Filename of known host keys")
+	flag.StringVar(&fPassword, "password", "", "Password if private key is not given")
+	flag.StringVar(&fUser, "user", "admin", "User to use when accessing DRAC")
+	flag.StringVar(&fHostname, "hostname", "", "Hostname and port to access the DRAC")
 }
 
 func main() {
+	flag.Parse()
+
 	log.Println(os.Args)
 	if len(os.Args) != 5 {
-		log.Fatalf("Usage: %s <user> <host:port> <password> <command>", os.Args[0])
+		log.Fatalf("Usage: %s [flags] <command>", os.Args[0])
 	}
 
-	client, session, err := connectToHost(os.Args[1], os.Args[2], os.Args[3])
+	client, err := connectToHost(fUser, fHostname, fPassword)
 	if err != nil {
 		panic(err)
 	}
-	log.Println("Run:", os.Args[4])
-	out, err := session.CombinedOutput(os.Args[4])
-	if err != nil {
-		log.Println("output:", out)
-		panic(err)
+	defer client.Close()
+
+	for _, arg := range flag.Args() {
+		log.Println("new session")
+		session, err := client.NewSession()
+		if err != nil {
+			panic(err)
+		}
+
+		log.Println("Run:", arg)
+		out, err := session.CombinedOutput(arg)
+		if err != nil {
+			log.Println("output:", out)
+			panic(err)
+		}
+		log.Println("output:")
+		fmt.Println(string(out))
 	}
-	log.Println("output:")
-	fmt.Println(string(out))
-	client.Close()
-	log.Println("closed")
+
+	log.Println("closing")
 }
 
-func connectToHost(user, host, password string) (*ssh.Client, *ssh.Session, error) {
+func connectToHost(user, host, password string) (*ssh.Client, error) {
 	log.Println("hostkeys")
-	hostKeyCallback, err := knownhosts.New("mlab4.lga0t.txt")
+	hostKeyCallback, err := knownhosts.New(fHostKeyFile)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	signer, err := readPrivateKey("f1024")
-	if err != nil {
-		return nil, nil, err
+	var authMethod ssh.AuthMethod
+	if password != "" {
+		authMethod = ssh.Password(password)
+	} else {
+		signer, err := ssh.ParsePrivateKey(fPrivateKey)
+		if err != nil {
+			return nil, err
+		}
+		authMethod = ssh.PublicKeys(signer)
 	}
+
 	sshConfig := &ssh.ClientConfig{
-		Config: ssh.Config{
-			RekeyThreshold: 1024 * 8,
-		},
-		User: user,
-		Auth: []ssh.AuthMethod{
-			// ssh.Password(password)
-			ssh.PublicKeys(signer),
-		},
+		User:            user,
+		Auth:            []ssh.AuthMethod{authMethod},
 		HostKeyCallback: hostKeyCallback,
 	}
 	// ssh.FixedHostKey()
 	// accepts an ssh.PublicKey
 	// one of *rsa.PublicKey
 	// TODO: how to deserialize an ssh public key?
-	// 
+	//
 	// $ ssh-keyscan -p 806  mlab3d.lga03.measurement-lab.org > host.txt
 	// $ ssh-keygen -f mlab3d.lga03.pub -e -m pem > mlab3d.lga03.pem
 
 	// Add user public key to the DRAC. to authenticate with private key.
 	// https://www.dell.com/support/manuals/us/en/04/integrated-dell-remote-access-cntrllr-8-with-lifecycle-controller-v2.00.00.00/racadm_idrac_pub-v1/sshpkauth?guid=guid-be12abd1-4995-4fa3-b090-9cb41321b7a4&lang=en-us
-	
+
 	// TODO:
 	// ssh/knownhosts.New -- https://godoc.org/golang.org/x/crypto/ssh/knownhosts#New
 	// reads a know_hosts file to implement the HostKeyCallback function.
 	// Same format as output from ssh-keyscan!
 
 	/*
-	hostKey, err := parseHostKey()
-	if err != nil {
-		panic(err)
-	}
+		hostKey, err := parseHostKey()
+		if err != nil {
+			panic(err)
+		}
 	*/
 	// Failing to match host key.
 	// sshConfig.HostKeyCallback = ssh.FixedHostKey(hostKey)
@@ -98,28 +124,15 @@ func connectToHost(user, host, password string) (*ssh.Client, *ssh.Session, erro
 	log.Println("dial")
 	client, err := ssh.Dial("tcp", host, sshConfig)
 	if err != nil {
-		return nil, nil, err
-	}
-
-	log.Println("new session")
-	session, err := client.NewSession()
-	if err != nil {
-		client.Close()
-		return nil, nil, err
-	}
-
-	return client, session, nil
-}
-
-func readPrivateKey(name string) (ssh.Signer, error) {
-	pem, err := ioutil.ReadFile(name)
-	if err != nil {
 		return nil, err
 	}
 
-	signer, err := ssh.ParsePrivateKey(pem)
-	if err != nil {
-		return nil, err
-	}
-	return signer, nil
+	//	log.Println("new session")
+	//	session, err := client.NewSession()
+	//	if err != nil {
+	//		client.Close()
+	//		return nil, nil, err
+	//	}
+
+	return client, nil
 }
